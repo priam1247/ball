@@ -1,25 +1,14 @@
 """
 bot.py — ScoreLine Live main bot
 ==================================
-Events posted (in order):
+Events posted:
   1. 📋 Lineup confirmed (pre-match, if data available)
-  2. ⚽ Kick-off
-  3. ⚽ Goal (with score, scorer, assist)
-  4. 🟥 Red card
-  5. 🕐 Half time
-  6. ⏱️ Extra time start  (knockout matches only, when applicable)
-  7. 🏁 Full time          (includes AET / penalty shootout result)
+  2. ▶️  Kick-off
+  3. ⚽ Goal (with score and scorer)
+  4. ⏱️  Extra time start
+  5. 🏁 Full time (includes AET / penalty result)
 
-Cancelled / postponed / abandoned games:
-  Silently dropped by scraper.py — they never appear in the match list,
-  so no events are ever posted for them.
-
-Smart duplicate detection:
-  Events are stored with their posted timestamp.
-  Events older than 24 hours are cleaned up automatically.
-
-Railway keep-alive:
-  Runs a lightweight HTTP server on PORT in a background thread.
+No halftime posts. No red card posts.
 """
 
 import json
@@ -47,7 +36,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt, *args):
-        pass  # suppress HTTP access logs
+        pass
 
 
 def _start_keepalive():
@@ -58,7 +47,7 @@ def _start_keepalive():
 
 
 # ══════════════════════════════════════════════════════════════════
-# STATE — persisted to state.json across restarts
+# STATE
 # ══════════════════════════════════════════════════════════════════
 
 STATE_FILE = "state.json"
@@ -115,6 +104,8 @@ def _mark_posted(key: str):
 def _post_if_new(key: str, message: str) -> bool:
     if _already_posted(key):
         return False
+    if not message:
+        return False
     ok = poster.post(message)
     if ok:
         _mark_posted(key)
@@ -128,8 +119,6 @@ def _post_if_new(key: str, message: str) -> bool:
 def _key_lineup(mid: str)        -> str: return f"lineup:{mid}"
 def _key_kickoff(mid: str)       -> str: return f"kickoff:{mid}"
 def _key_goal(mid: str, g: dict) -> str: return f"goal:{mid}:{g['scorer']['name']}:{g['minute']}"
-def _key_red(mid: str, b: dict)  -> str: return f"red:{mid}:{b['player']['name']}:{b['minute']}"
-def _key_halftime(mid: str)      -> str: return f"ht:{mid}"
 def _key_extratime(mid: str)     -> str: return f"extratime:{mid}"
 def _key_fulltime(mid: str)      -> str: return f"ft:{mid}"
 
@@ -164,8 +153,6 @@ def process_match(match: dict):
     aname  = match["awayTeam"]["name"]
 
     # ── Lineups ───────────────────────────────────────────────────
-    # Note: ESPN scoreboard does not provide lineup data, so this
-    # will only fire if a future data source adds lineup support.
     if (config.POST_LINEUPS
             and status == "SCHEDULED"
             and match.get("lineups")
@@ -177,7 +164,7 @@ def process_match(match: dict):
     if config.POST_KICKOFF and status == "IN_PLAY":
         _post_if_new(_key_kickoff(mid), poster.fmt_kickoff(match))
 
-    # ── Goals (normal time, extra time, and shootout phase) ───────
+    # ── Goals ─────────────────────────────────────────────────────
     if config.POST_GOALS and status in ("IN_PLAY", "PAUSED", "EXTRA_TIME", "SHOOTOUT", "FINISHED"):
         for goal in match.get("goals", []):
             key = _key_goal(mid, goal)
@@ -187,14 +174,7 @@ def process_match(match: dict):
                 _post_if_new(key, poster.fmt_goal(match, goal))
                 time.sleep(2)
 
-    # Red card posts disabled — not posted per page style
-
-    # Half time posts disabled — not posted per page style
-
-    # ── Extra time start ──────────────────────────────────────────
-    # Post once when the match enters extra time. We also catch the case
-    # where we miss the EXTRA_TIME status window and land directly on
-    # SHOOTOUT or a FINISHED match that went to ET (via _went_to_et flag).
+    # ── Extra time ────────────────────────────────────────────────
     if status in ("EXTRA_TIME", "SHOOTOUT") or (
         status == "FINISHED" and match.get("_went_to_et")
     ):
@@ -202,24 +182,22 @@ def process_match(match: dict):
             print(f"[BOT] ⏱️ Extra time: {hname} vs {aname}")
             _post_if_new(_key_extratime(mid), poster.fmt_extratime(match))
 
-    # ── Full time (includes AET / penalty result) ─────────────────
+    # ── Full time ─────────────────────────────────────────────────
     if config.POST_FULLTIME and status == "FINISHED":
         if match.get("_went_to_penalties"):
             print(f"[BOT] 🏁 Full time (penalties): {hname} vs {aname}")
         elif match.get("_went_to_et"):
             print(f"[BOT] 🏁 Full time (AET): {hname} vs {aname}")
+        else:
+            print(f"[BOT] 🏁 Full time: {hname} vs {aname}")
         _post_if_new(_key_fulltime(mid), poster.fmt_fulltime(match))
 
 
 # ══════════════════════════════════════════════════════════════════
-# STARTUP — seed finished matches so we never repost old results
+# STARTUP — seed finished matches to prevent duplicate posts
 # ══════════════════════════════════════════════════════════════════
 
 def _seed_finished(matches: list):
-    """
-    On startup, silently mark all already-FINISHED matches as posted.
-    Prevents reposting results from games that ended before the bot started.
-    """
     seeded = 0
     for m in matches:
         if m["status"] != "FINISHED":
@@ -227,7 +205,6 @@ def _seed_finished(matches: list):
         mid = m["id"]
         for key in (
             _key_fulltime(mid),
-            _key_halftime(mid),
             _key_kickoff(mid),
             _key_lineup(mid),
             _key_extratime(mid),
@@ -240,15 +217,9 @@ def _seed_finished(matches: list):
             if k not in _events:
                 _events[k] = time.time()
                 seeded += 1
-        for b in m.get("bookings", []):
-            if b.get("card") == "RED_CARD":
-                k = _key_red(mid, b)
-                if k not in _events:
-                    _events[k] = time.time()
-                    seeded += 1
     if seeded:
         _save_state()
-        print(f"[STATE] 🌱 Seeded {seeded} keys from already-finished matches — no duplicate posts")
+        print(f"[STATE] 🌱 Seeded {seeded} keys from already-finished matches")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -265,10 +236,9 @@ def main():
     print("=" * 54)
     print("  ScoreLine Live Bot — Running")
     print(f"  Poll interval : {config.POLL_INTERVAL}s")
+    print(f"  Lineups       : {config.POST_LINEUPS}")
     print(f"  Kick-off      : {config.POST_KICKOFF}")
     print(f"  Goals         : {config.POST_GOALS}")
-    print(f"  Red cards     : {config.POST_RED_CARDS}")
-    print(f"  Half time     : {config.POST_HALFTIME}")
     print(f"  Full time     : {config.POST_FULLTIME}")
     print(f"  Preview       : {config.POST_DAILY_PREVIEW} @ {config.DAILY_PREVIEW_HOUR}:00 UTC")
     print(f"  FB Page ID    : {'SET ✅' if config.FB_PAGE_ID else 'NOT SET — dev mode'}")
@@ -285,14 +255,14 @@ def main():
             matches = scraper.get_todays_matches()
             print(f"[BOT] {len(matches)} matches today:")
             for m in matches:
-                et_tag = " [ET]" if m.get("_went_to_et") else ""
-                pen_tag = " [PEN]" if m.get("_went_to_penalties") else ""
-                print(f"       {m.get('_comp_flag','⚽')} {m['homeTeam']['name']} vs "
-                      f"{m['awayTeam']['name']} [{m['status']}{et_tag}{pen_tag}]")
+                et_tag  = " [ET]"  if m.get("_went_to_et")          else ""
+                pen_tag = " [PEN]" if m.get("_went_to_penalties")    else ""
+                print(f"       {m.get('_comp_flag','⚽')} "
+                      f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} "
+                      f"[{m['status']}{et_tag}{pen_tag}]")
 
             maybe_post_preview(matches)
 
-            # Process all non-cancelled active matches
             active = [
                 m for m in matches
                 if m["status"] in (
@@ -305,7 +275,7 @@ def main():
                 try:
                     process_match(match)
                 except Exception as e:
-                    print(f"[BOT] ⚠️  Error processing {match.get('id','?')}: {e}")
+                    print(f"[BOT] ⚠️  Error on {match.get('id','?')}: {e}")
 
             if tick % (3600 // config.POLL_INTERVAL) == 0:
                 _cleanup_state()
