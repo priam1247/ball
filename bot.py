@@ -187,20 +187,9 @@ def process_match(match: dict):
                 _post_if_new(key, poster.fmt_goal(match, goal))
                 time.sleep(2)
 
-    # ── Red cards ─────────────────────────────────────────────────
-    if config.POST_RED_CARDS and status in ("IN_PLAY", "PAUSED", "EXTRA_TIME", "SHOOTOUT", "FINISHED"):
-        for booking in match.get("bookings", []):
-            if booking.get("card") != "RED_CARD":
-                continue
-            key = _key_red(mid, booking)
-            if not _already_posted(key):
-                player = booking["player"]["name"]
-                print(f"[BOT] 🟥 Red card: {player} — {hname} vs {aname}")
-                _post_if_new(key, poster.fmt_red_card(match, booking))
+    # Red card posts disabled — not posted per page style
 
-    # ── Half time ─────────────────────────────────────────────────
-    if config.POST_HALFTIME and status == "PAUSED":
-        _post_if_new(_key_halftime(mid), poster.fmt_halftime(match))
+    # Half time posts disabled — not posted per page style
 
     # ── Extra time start ──────────────────────────────────────────
     # Post once when the match enters extra time. We also catch the case

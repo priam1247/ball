@@ -1,11 +1,30 @@
 """
 poster.py — Facebook posting + message formatters
 ===================================================
-Post format rules:
-  • No horizontal separator lines
-  • Only TWO hashtags per post: #ScoreLineLive  #CompetitionName
-  • National teams get their country flag emoji automatically
-  • Extra time and penalty shootout results are clearly labelled
+Post format matches the app screenshots exactly:
+
+  Daily preview:
+    📌 Today's games:
+    🇩🇪 Germany - 🇬🇭 Ghana (20:45)
+    🇬🇧 England - 🇯🇵 Japan (20:45)
+    #scorelinelive
+
+  Kickoff:
+    ▶️ Live: 🇩🇪 Germany 0-0 🇬🇭 Ghana
+    ⚽ Kickoff!
+    #scorelinelive
+
+  Goal:
+    ▶️ Live: 🇩🇪 Germany 1-1 🇬🇭 Ghana
+    ⚽ Goal: Fatawu (70')
+    #scorelinelive
+
+  Full time:
+    ▶️ FT: 🇬🇩 Grenada 0-3 🇰🇪 Kenya
+    ⚽ Goal: Obiero (82')
+    #scorelinelive
+
+No halftime posts. No red card posts.
 """
 
 import time
@@ -51,7 +70,8 @@ COUNTRY_FLAG = {
     "Trinidad and Tobago": "🇹🇹", "Trinidad & Tobago": "🇹🇹",
     "El Salvador": "🇸🇻", "Guatemala": "🇬🇹", "Nicaragua": "🇳🇮",
     "Cuba": "🇨🇺", "Curacao": "🇨🇼", "Martinique": "🇲🇶",
-    "Aruba": "🇦🇼", "Bermuda": "🇧🇲",
+    "Aruba": "🇦🇼", "Bermuda": "🇧🇲", "Grenada": "🇬🇩",
+    "Guyana": "🇬🇾", "Belize": "🇧🇿", "Suriname": "🇸🇷",
     # Africa
     "Nigeria": "🇳🇬", "Ghana": "🇬🇭", "Senegal": "🇸🇳",
     "Morocco": "🇲🇦", "Egypt": "🇪🇬", "Cameroon": "🇨🇲",
@@ -99,7 +119,6 @@ COUNTRY_FLAG = {
 
 
 def team_flag(name: str) -> str:
-    """Return the country flag emoji for a team name, or '' if it's a club."""
     if name in COUNTRY_FLAG:
         return COUNTRY_FLAG[name]
     for country, flag in COUNTRY_FLAG.items():
@@ -108,10 +127,23 @@ def team_flag(name: str) -> str:
     return ""
 
 
-def team_display(name: str) -> str:
-    """Append flag emoji to team name if it's a national team."""
-    flag = team_flag(name)
-    return f"{flag} {name}" if flag else name
+def _td(name: str) -> str:
+    """Team display: flag + name."""
+    f = team_flag(name)
+    return f"{f} {name}" if f else name
+
+
+def _scoreline(match: dict) -> str:
+    """e.g.  🇩🇪 Germany 1-1 🇬🇭 Ghana"""
+    h  = match["score"]["fullTime"].get("home")
+    a  = match["score"]["fullTime"].get("away")
+    hs = str(h) if h is not None else "0"
+    as_= str(a) if a is not None else "0"
+    return f"{_td(match['homeTeam']['name'])} {hs}-{as_} {_td(match['awayTeam']['name'])}"
+
+
+def _minute(minute) -> str:
+    return str(minute).rstrip("'").strip()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -139,16 +171,12 @@ def _rate_ok() -> bool:
 
 
 def post(message: str) -> bool:
-    """Post to the Facebook page. Returns True on success."""
     global _last_post_time, _posts_this_hour
-
     if not config.FB_PAGE_ID:
         print(f"\n{'='*50}\n[FB POST]\n{message}\n{'='*50}\n")
         return True
-
     if not _rate_ok():
         return False
-
     try:
         r = requests.post(
             f"https://graph.facebook.com/v19.0/{config.FB_PAGE_ID}/feed",
@@ -169,243 +197,138 @@ def post(message: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════
-# HELPERS
+# MESSAGE FORMATTERS — match the app screenshots exactly
 # ══════════════════════════════════════════════════════════════════
 
-def _score_line(match: dict) -> str:
-    h   = match["score"]["fullTime"].get("home")
-    a   = match["score"]["fullTime"].get("away")
-    hs  = str(h) if h is not None else "-"
-    as_ = str(a) if a is not None else "-"
-    return (f"{team_display(match['homeTeam']['name'])} "
-            f"{hs} - {as_} "
-            f"{team_display(match['awayTeam']['name'])}")
-
-
-def _ht_score_line(match: dict) -> str:
-    h = match["score"]["halfTime"].get("home")
-    a = match["score"]["halfTime"].get("away")
-    if h is None or a is None:
-        return ""
-    return f"HT: {h} - {a}"
-
-
-def _tags(match: dict) -> str:
+def fmt_daily_preview(matches: list) -> str:
     """
-    Exactly two hashtags:
-      #ScoreLineLive   — always present
-      #CompetitionName — no spaces, e.g. #ChampionsLeague
+    📌 Today's games:
+    🇩🇪 Germany - 🇬🇭 Ghana (20:45)
+    🇬🇧 England - 🇯🇵 Japan (20:45)
+    #scorelinelive
     """
-    comp = match.get("_comp_name", "Football").replace(" ", "")
-    return f"#ScoreLineLive #{comp}"
+    from datetime import datetime, timezone
 
+    if not matches:
+        return "📌 Today's games:\nNo big matches today. Check back tomorrow!\n\n#scorelinelive"
 
-# ══════════════════════════════════════════════════════════════════
-# MESSAGE FORMATTERS
-# ══════════════════════════════════════════════════════════════════
+    lines = ["📌 Today's games:"]
+    sorted_m = sorted(matches, key=lambda m: m.get("utcDate", ""))
+    for m in sorted_m:
+        h = _td(m["homeTeam"]["name"])
+        a = _td(m["awayTeam"]["name"])
+        try:
+            ko = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+            t  = ko.strftime("%H:%M")
+        except Exception:
+            t = "TBD"
+        lines.append(f"{h} - {a} ({t})")
+
+    lines.append("\n#scorelinelive")
+    return "\n".join(lines)
+
 
 def fmt_lineup(match: dict) -> str:
-    comp = match.get("_comp_name", "Football")
-    flag = match.get("_comp_flag", "⚽")
-    lines = [
-        f"{flag} LINEUP CONFIRMED | {comp}",
-        f"⚽ {team_display(match['homeTeam']['name'])} vs "
-        f"{team_display(match['awayTeam']['name'])}",
-        "",
-    ]
+    """
+    📌 Lineups: 🇩🇪 Germany vs 🇬🇭 Ghana
+    Germany: Neuer, Kimmich, Wirtz...
+    Ghana: Ati-Zigi, Kudus...
+    #scorelinelive
+    """
+    h = _td(match["homeTeam"]["name"])
+    a = _td(match["awayTeam"]["name"])
+    lines = [f"📌 Lineups: {h} vs {a}"]
     for lu in match.get("lineups", []):
-        team = lu.get("team", "")
-        xi   = lu.get("startXI", [])
-        lines.append(f"📋 {team}")
-        for i, p in enumerate(xi, 1):
-            num     = p["player"].get("number", "")
-            name    = p["player"].get("name", "?")
-            num_str = f"({num}) " if num else ""
-            lines.append(f"  {i}. {num_str}{name}")
-        lines.append("")
-    lines.append(_tags(match))
+        team    = lu.get("team", "")
+        players = [p["player"].get("name", "?") for p in lu.get("startXI", [])]
+        if players:
+            lines.append(f"{team}: {', '.join(players)}")
+    lines.append("\n#scorelinelive")
     return "\n".join(lines)
 
 
 def fmt_kickoff(match: dict) -> str:
-    comp = match.get("_comp_name", "Football")
-    flag = match.get("_comp_flag", "⚽")
-    return "\n".join([
-        f"{flag} KICK OFF! | {comp}",
-        f"⚽ {_score_line(match)}",
-        "",
-        "The match has started! Follow us for live updates 🔔",
-        "",
-        _tags(match),
-    ])
+    """
+    ▶️ Live: 🇩🇪 Germany 0-0 🇬🇭 Ghana
+    ⚽ Kickoff!
+    #scorelinelive
+    """
+    h = _td(match["homeTeam"]["name"])
+    a = _td(match["awayTeam"]["name"])
+    return f"▶️ Live: {h} 0-0 {a}\n⚽ Kickoff!\n\n#scorelinelive"
 
 
 def fmt_goal(match: dict, goal: dict) -> str:
-    comp   = match.get("_comp_name", "Football")
-    flag   = match.get("_comp_flag", "⚽")
+    """
+    ▶️ Live: 🇩🇪 Germany 1-1 🇬🇭 Ghana
+    ⚽ Goal: Fatawu (70')
+    #scorelinelive
+    """
     scorer = goal["scorer"]["name"]
-    team   = goal["team"]["shortName"]
-    minute = goal["minute"]
-    assist = goal.get("assist", {}).get("name", "")
+    minute = _minute(goal["minute"])
 
+    # Score at moment of goal
     sc = goal.get("score", [])
     if sc and len(sc) == 2 and sc[0] is not None:
-        score_now = f"{sc[0]} - {sc[1]}"
+        h_sc, a_sc = sc[0], sc[1]
+        scoreline = (f"{_td(match['homeTeam']['name'])} {h_sc}-{a_sc} "
+                     f"{_td(match['awayTeam']['name'])}")
     else:
-        h = match["score"]["fullTime"].get("home", "-")
-        a = match["score"]["fullTime"].get("away", "-")
-        score_now = f"{h} - {a}"
-
-    team_flag_emoji = (
-        team_flag(team)
-        or team_flag(match["homeTeam"]["name"] if goal.get("isHome") else match["awayTeam"]["name"])
-    )
+        scoreline = _scoreline(match)
 
     lines = [
-        f"⚽ GOAL! {flag} | {comp}",
-        f"{team_display(match['homeTeam']['name'])} {score_now} {team_display(match['awayTeam']['name'])}",
-        "",
-        f"🎯 {scorer} {team_flag_emoji} — {minute}'",
+        f"▶️ Live: {scoreline}",
+        f"⚽ Goal: {scorer} ({minute}')",
     ]
+    assist = goal.get("assist", {}).get("name", "")
     if assist:
-        lines.append(f"🅰️  Assist: {assist}")
-    lines.append(f"   ({team})")
-    lines.append("")
-    lines.append(_tags(match))
+        lines.append(f"🅰️ Assist: {assist}")
+    lines.append("\n#scorelinelive")
     return "\n".join(lines)
 
 
-def fmt_red_card(match: dict, booking: dict) -> str:
-    comp   = match.get("_comp_name", "Football")
-    flag   = match.get("_comp_flag", "⚽")
-    player = booking["player"]["name"]
-    team   = booking["team"]["shortName"]
-    minute = booking["minute"]
-    return "\n".join([
-        f"🟥 RED CARD! {flag} | {comp}",
-        f"⚽ {_score_line(match)}",
-        "",
-        f"🟥 {player} ({team}) — {minute}'",
-        "",
-        _tags(match),
-    ])
+def fmt_fulltime(match: dict) -> str:
+    """
+    ▶️ FT: 🇬🇩 Grenada 0-3 🇰🇪 Kenya
+    ⚽ Goal: Obiero (82')
+    ⚽ Goal: Obiero (45')
+    #scorelinelive
+    """
+    scoreline = _scoreline(match)
 
+    # AET / penalties label
+    prefix = "FT"
+    if match.get("_went_to_penalties"):
+        ph = match.get("_penalty_home", "")
+        pa = match.get("_penalty_away", "")
+        prefix = f"FT (Pen: {ph}-{pa})"
+    elif match.get("_went_to_et"):
+        prefix = "FT (AET)"
 
-def fmt_halftime(match: dict) -> str:
-    comp = match.get("_comp_name", "Football")
-    flag = match.get("_comp_flag", "⚽")
-    ht   = _ht_score_line(match)
+    lines = [f"▶️ {prefix}: {scoreline}"]
 
-    goal_lines = []
     for g in match.get("goals", []):
-        scorer  = g["scorer"]["name"]
-        team    = g["team"]["shortName"]
-        minute  = g["minute"]
-        goal_lines.append(f"  ⚽ {scorer} ({team}) {minute}'")
-    goals_str = "\n".join(goal_lines) if goal_lines else "  No goals yet"
+        scorer = g["scorer"]["name"]
+        minute = _minute(g["minute"])
+        lines.append(f"⚽ Goal: {scorer} ({minute}')")
 
-    lines = [
-        f"{flag} HALF TIME | {comp}",
-        f"🕐 {_score_line(match)}",
-    ]
-    if ht:
-        lines.append(ht)
-    lines += ["", "1st Half Goals:", goals_str, "", _tags(match)]
+    lines.append("\n#scorelinelive")
     return "\n".join(lines)
 
 
 def fmt_extratime(match: dict) -> str:
-    """Posted once when a match enters extra time."""
-    comp = match.get("_comp_name", "Football")
-    flag = match.get("_comp_flag", "⚽")
-    return "\n".join([
-        f"{flag} EXTRA TIME! | {comp}",
-        f"⏱️ {_score_line(match)}",
-        "",
-        "90 minutes weren't enough — extra time is underway! 🔥",
-        "",
-        _tags(match),
-    ])
+    """
+    ▶️ Live: 🇩🇪 Germany 1-1 🇬🇭 Ghana
+    ⏱️ Extra time underway!
+    #scorelinelive
+    """
+    return (f"▶️ Live: {_scoreline(match)}\n"
+            f"⏱️ Extra time underway!\n\n#scorelinelive")
 
 
-def fmt_fulltime(match: dict) -> str:
-    comp = match.get("_comp_name", "Football")
-    flag = match.get("_comp_flag", "⚽")
-    ht   = _ht_score_line(match)
+# Kept for bot.py compatibility — no longer posts but referenced
+def fmt_halftime(match: dict) -> str:
+    return ""
 
-    # Build result suffix — AET / Penalties
-    result_line = ""
-    if match.get("_went_to_penalties") and match.get("_penalty_home") is not None:
-        ph = match["_penalty_home"]
-        pa = match["_penalty_away"]
-        h_name = match["homeTeam"]["name"]
-        a_name = match["awayTeam"]["name"]
-        # Determine winner
-        if ph > pa:
-            winner = team_display(h_name)
-        elif pa > ph:
-            winner = team_display(a_name)
-        else:
-            winner = "Draw"
-        result_line = f"🥅 Penalties: {ph} - {pa}  ({winner} wins)"
-    elif match.get("_went_to_et"):
-        result_line = "⏱️ After Extra Time (AET)"
-
-    goal_lines = []
-    for g in match.get("goals", []):
-        scorer = g["scorer"]["name"]
-        team   = g["team"]["shortName"]
-        minute = g["minute"]
-        goal_lines.append(f"  ⚽ {scorer} ({team}) {minute}'")
-    goals_str = "\n".join(goal_lines) if goal_lines else "  No goals"
-
-    lines = [
-        f"{flag} FULL TIME | {comp}",
-        f"🏁 {_score_line(match)}",
-    ]
-    if ht:
-        lines.append(ht)
-    if result_line:
-        lines.append(result_line)
-    lines += ["", "Goals:", goals_str, "", _tags(match)]
-    return "\n".join(lines)
-
-
-def fmt_daily_preview(matches: list) -> str:
-    if not matches:
-        return (
-            "⚽ No big matches on the schedule today.\n"
-            "Check back tomorrow!\n\n"
-            "#ScoreLineLive #Football"
-        )
-    from itertools import groupby
-    from datetime import datetime, timezone
-
-    lines = ["⚽ TODAY'S BIG MATCHES"]
-
-    sorted_m = sorted(
-        matches,
-        key=lambda m: (m.get("_comp_name", ""), m.get("utcDate", ""))
-    )
-
-    for comp_name, grp in groupby(sorted_m, key=lambda m: m.get("_comp_name", "")):
-        grp_list  = list(grp)
-        comp_flag = grp_list[0].get("_comp_flag", "⚽") if grp_list else "⚽"
-        lines.append(f"\n{comp_flag} {comp_name}")
-        for m in grp_list:
-            h = team_display(m["homeTeam"]["name"])
-            a = team_display(m["awayTeam"]["name"])
-            try:
-                ko = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
-                t  = ko.strftime("%H:%M UTC")
-            except Exception:
-                t = "TBD"
-            lines.append(f"  ⚔️  {h} vs {a}  🕐 {t}")
-
-    lines += [
-        "",
-        f"🔔 {len(matches)} matches today — follow us for live goals, red cards & results!",
-        "",
-        "#ScoreLineLive #Football",
-    ]
-    return "\n".join(lines)
+def fmt_red_card(match: dict, booking: dict) -> str:
+    return ""
