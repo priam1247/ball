@@ -5,22 +5,26 @@ Auto-posts live football updates to your Facebook page. **100% free** — no pai
 ## What gets posted
 | Event | Example |
 |-------|---------|
-| 📋 Lineup | Starting XI for both teams ~1hr before KO |
-| ⚽ Kick-off | Match has started |
-| ⚽ Goal | Scorer, assist, updated score |
-| 🟥 Red card | Player name, minute |
-| 🕐 Half time | HT score + 1st half goals |
-| 🏁 Full time | Final score + all goals |
+| 📋 Lineup | Starting XI ~1hr before KO (when available) |
+| ▶️ Kick-off | `Live: 🇩🇪 Germany 0-0 🇬🇭 Ghana — Kickoff!` |
+| ⚽ Goal | Scorer, minute, live score at moment of goal |
+| ⏱️ Extra time | Notifies when ET starts (knockout matches) |
+| 🏁 Full time | Final score + all goals. AET/Penalties clearly labelled |
 | 📅 Daily preview | Morning fixture list (7AM UTC) |
+
+**Not posted:** halftime scores, red cards, cancelled/postponed games.
 
 ## Coverage
 - **Club**: EPL, Bundesliga, La Liga, Serie A, Ligue 1, UCL, UEL, UECL, FA Cup + more
-- **International**: **ALL** country vs country games detected automatically by team name — WC Qualifiers, AFCON, Nations League, Copa America, Friendlies, any FIFA series
+- **International**: **ALL** country vs country games detected automatically — WC Qualifiers, AFCON, Nations League, Copa America, Friendlies, any FIFA series
+
+## Data source
+ESPN free API only — no API keys, no paid tiers, 100% free.
 
 ## Files
 ```
 bot.py          ← Run this
-scraper.py      ← FotMob (primary) + ESPN (backup) data
+scraper.py      ← ESPN data (scores, goals, status)
 poster.py       ← Facebook API + message formatters
 config.py       ← All settings via env vars
 requirements.txt
@@ -55,8 +59,6 @@ python bot.py
 | `POST_LINEUPS` | `true` |
 | `POST_KICKOFF` | `true` |
 | `POST_GOALS` | `true` |
-| `POST_RED_CARDS` | `true` |
-| `POST_HALFTIME` | `true` |
 | `POST_FULLTIME` | `true` |
 | `POST_DAILY_PREVIEW` | `true` |
 | `DAILY_PREVIEW_HOUR` | `7` |
@@ -68,5 +70,5 @@ python bot.py
 The bot binds an HTTP server to Railway's `PORT` automatically — no sleep issues.
 
 ## Adding leagues
-Edit `FOTMOB_CLUB_IDS` in `scraper.py`. Find league IDs from fotmob.com URLs.
+Edit `ESPN_CLUB_LEAGUES` in `scraper.py`. Find ESPN slugs at `site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard`.
 International games need no changes — all country vs country is auto-included.

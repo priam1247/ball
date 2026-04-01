@@ -197,19 +197,36 @@ def _espn_get(url: str, timeout: int = 10) -> dict | None:
 
 
 def espn_get_league(slug: str, league_name: str) -> list[dict]:
-    today     = datetime.now(timezone.utc).strftime("%Y%m%d")
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    data      = _espn_get(f"{ESPN_API}/{slug}/scoreboard?dates={today}")
-    if not data:
-        return []
-    results = []
-    for e in data.get("events", []):
-        # ESPN sometimes leaks yesterday's results — filter by today
-        event_date = e.get("date", "")
-        if event_date and not event_date.startswith(today_str):
+    from datetime import timedelta
+    now       = datetime.now(timezone.utc)
+    today     = now.strftime("%Y%m%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
+    today_str     = now.strftime("%Y-%m-%d")
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    seen_ids = set()   # BUG5 FIX: deduplicate — same match can appear in both date fetches
+    results  = []
+    # Fetch both today AND yesterday to catch late-night matches still running
+    for date_str, date_prefix in [(today, today_str), (yesterday, yesterday_str)]:
+        data = _espn_get(f"{ESPN_API}/{slug}/scoreboard?dates={date_str}")
+        if not data:
             continue
-        n = _normalize_espn(e, slug, league_name)
-        if n:
+        for e in data.get("events", []):
+            event_date = e.get("date", "")
+            # Skip if not from the date we fetched
+            if event_date and not event_date.startswith(date_prefix):
+                continue
+            n = _normalize_espn(e, slug, league_name)
+            if not n:
+                continue
+            # Always include live/active matches regardless of date
+            # Only skip yesterday's matches if they are already finished
+            if date_str == yesterday and n["status"] == "FINISHED":
+                continue
+            # BUG5 FIX: skip if we already have this match from today's fetch
+            if n["id"] in seen_ids:
+                continue
+            seen_ids.add(n["id"])
             results.append(n)
     return results
 
@@ -285,11 +302,15 @@ def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
             # Penalty shootout result — ESPN stores these as integers on the comp object
             sh = comp.get("shootoutHome")
             sa = comp.get("shootoutAway")
-            if sh is not None and sa is not None and str(sh).lstrip("-").isdigit():
-                went_to_penalties = True
-                went_to_et        = True
-                penalty_home      = int(sh)
-                penalty_away      = int(sa)
+            if sh is not None and sa is not None:
+                try:
+                    # BUG2 FIX: ESPN sometimes returns "3.0" — use int(float()) to be safe
+                    penalty_home      = int(float(str(sh)))
+                    penalty_away      = int(float(str(sa)))
+                    went_to_penalties = True
+                    went_to_et        = True
+                except (ValueError, TypeError):
+                    pass
             elif "AET" in name_str or "OVER_TIME" in name_str:
                 # Ended after ET but no shootout
                 went_to_et = True
@@ -434,7 +455,9 @@ def _is_stale_finished(match: dict) -> bool:
     try:
         ko      = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
         elapsed = (datetime.now(timezone.utc) - ko).total_seconds() / 3600
-        return elapsed > 4
+        # BUG6 FIX: 4h was too tight — a 22:00 KO with ET + pens + delays can hit ~2.5h play time.
+        # 6h gives safe headroom without leaking genuinely old results.
+        return elapsed > 6
     except Exception:
         return False
 

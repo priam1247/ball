@@ -3,7 +3,7 @@ bot.py — ScoreLine Live main bot
 ==================================
 Events posted:
   1. 📋 Lineup confirmed (pre-match, if data available)
-  2. ▶️  Kick-off
+  2.📌  Kick-off
   3. ⚽ Goal (with score and scorer)
   4. ⏱️  Extra time start
   5. 🏁 Full time (includes AET / penalty result)
@@ -106,7 +106,12 @@ def _post_if_new(key: str, message: str) -> bool:
         return False
     if not message:
         return False
+    # Retry once after 10s on failure
     ok = poster.post(message)
+    if not ok:
+        print(f"[BOT] ⚠️  Post failed — retrying in 10s...")
+        time.sleep(10)
+        ok = poster.post(message)
     if ok:
         _mark_posted(key)
     return ok
@@ -161,8 +166,15 @@ def process_match(match: dict):
         _post_if_new(_key_lineup(mid), poster.fmt_lineup(match))
 
     # ── Kick-off ──────────────────────────────────────────────────
+    # Always force 0-0 — ESPN may already show a score by the time
+    # we detect IN_PLAY, but the kickoff post should always be 0-0
     if config.POST_KICKOFF and status == "IN_PLAY":
-        _post_if_new(_key_kickoff(mid), poster.fmt_kickoff(match))
+        kickoff_match = {**match, "score": {
+            "halfTime": {"home": None, "away": None},
+            "fullTime": {"home": 0, "away": 0},
+        }}
+        print(f"[BOT]📌  Kickoff: {hname} vs {aname}")
+        _post_if_new(_key_kickoff(mid), poster.fmt_kickoff(kickoff_match))
 
     # ── Goals ─────────────────────────────────────────────────────
     if config.POST_GOALS and status in ("IN_PLAY", "PAUSED", "EXTRA_TIME", "SHOOTOUT", "FINISHED"):
