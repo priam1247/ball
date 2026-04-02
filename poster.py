@@ -292,7 +292,7 @@ def post(message: str) -> bool:
 def fmt_daily_preview(matches: list) -> str:
     from datetime import datetime, timezone
     now      = datetime.now(timezone.utc)
-    date_str = now.strftime("%A %-d %B")
+    date_str = "{} {} {}".format(now.strftime("%A"), now.day, now.strftime("%B"))
 
     if not matches:
         return (

@@ -47,6 +47,10 @@ ESPN_CLUB_LEAGUES = {
     "ksa.1":            "Saudi Pro League",       # ESPN uses ksa.1, not sau.1
     "afc.champions":    "AFC Champions Elite",    # ESPN slug for AFC CL
     "caf.champions":    "CAF Champions League",
+    # ── Women's ───────────────────────────────────────────────────
+    "eng.w.1":          "Women's Super League",
+    "esp.w.1":          "Women's La Liga",
+    "uefa.wchampions":  "Women's Champions League",
 }
 
 ESPN_INTL_LEAGUES = {
@@ -171,7 +175,7 @@ def is_international_match(match: dict) -> bool:
 # ESPN — SOLE DATA SOURCE
 # ══════════════════════════════════════════════════════════════════
 
-ESPN_API = "http://site.api.espn.com/apis/site/v2/sports/soccer"
+ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 ESPN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -208,14 +212,16 @@ def espn_get_league(slug: str, league_name: str) -> list[dict]:
     results  = []
     # Fetch both today AND yesterday to catch late-night matches still running
     for date_str, date_prefix in [(today, today_str), (yesterday, yesterday_str)]:
-        data = _espn_get(f"{ESPN_API}/{slug}/scoreboard?dates={date_str}")
+        data = _espn_get(f"{ESPN_API}/{slug}/scoreboard?dates={date_str}&limit=50")
         if not data:
             continue
         for e in data.get("events", []):
             event_date = e.get("date", "")
-            # Skip if not from the date we fetched
-            if event_date and not event_date.startswith(date_prefix):
-                continue
+            # B5 FIX: never drop a live match on date alone (midnight crossings)
+            state   = e.get("status", {}).get("type", {}).get("state", "pre").lower()
+            if state != "in":
+                if event_date and not event_date.startswith(date_prefix):
+                    continue
             n = _normalize_espn(e, slug, league_name)
             if not n:
                 continue
