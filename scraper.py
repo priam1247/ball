@@ -1,59 +1,65 @@
 """
 scraper.py — ScoreLine Live data layer
 ========================================
-Source: ESPN (site.api.espn.com) — scores, events, live data
+Sole source: ESPN free API — no key, no rate limits, no tier restrictions.
 
-MATCH INCLUSION RULES:
-  ✅ ANY match where BOTH teams are countries (detected by name)
+MATCH INCLUSION:
   ✅ Whitelisted club leagues (EPL, UCL, La Liga, etc.)
-  ❌ Everything else — no spam from obscure regional cups
-  ❌ CANCELLED / POSTPONED / ABANDONED matches — silently ignored
+  ✅ Any match where BOTH teams are national teams (auto-detected)
+  ❌ Cancelled / postponed / abandoned — silently dropped
+  ❌ Obscure regional cups not in the whitelist
 
 EXTRA TIME & PENALTIES:
-  Detected automatically from ESPN status fields.
-  _went_to_et       → True if match went to extra time
-  _went_to_penalties→ True if decided by penalty shootout
-  _penalty_home/away→ Shootout score (goals scored, not misses)
+  Detected from ESPN status fields.
+  _went_to_et        → True if match went to extra time
+  _went_to_penalties → True if decided by penalty shootout
+  _penalty_home/away → Shootout score
+
+GOAL MINUTES:
+  ESPN provides clock values via scoringPlays[].clock.displayValue
+  e.g. "45:23" — poster._minute() normalises these to "45".
 """
 
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 # ══════════════════════════════════════════════════════════════════
 # ESPN COMPETITION SLUGS
 # ══════════════════════════════════════════════════════════════════
 
-ESPN_CLUB_LEAGUES = {
+ESPN_CLUB_LEAGUES: dict[str, str] = {
+    # Men's domestic
     "eng.1":            "Premier League",
+    "eng.2":            "Championship",
+    "eng.fa":           "FA Cup",
     "ger.1":            "Bundesliga",
     "esp.1":            "La Liga",
     "ita.1":            "Serie A",
     "fra.1":            "Ligue 1",
-    "uefa.champions":   "Champions League",
-    "uefa.europa":      "Europa League",
-    "uefa.europa.conf": "Europa Conference League",
-    "eng.fa":           "FA Cup",
-    "eng.2":            "Championship",
     "ned.1":            "Eredivisie",
     "por.1":            "Primeira Liga",
-    "usa.1":            "MLS",
-    "bra.1":            "Brasileirao",
-    "mex.1":            "Liga MX",
     "sco.1":            "Scottish Premiership",
     "tur.1":            "Süper Lig",
     "bel.1":            "Belgian Pro League",
-    "ksa.1":            "Saudi Pro League",       # ESPN uses ksa.1, not sau.1
-    "afc.champions":    "AFC Champions Elite",    # ESPN slug for AFC CL
+    "ksa.1":            "Saudi Pro League",
+    "bra.1":            "Brasileirao",
+    "mex.1":            "Liga MX",
+    "usa.1":            "MLS",
+    # Men's European / continental
+    "uefa.champions":   "Champions League",
+    "uefa.europa":      "Europa League",
+    "uefa.europa.conf": "Europa Conference League",
+    "afc.champions":    "AFC Champions Elite",
     "caf.champions":    "CAF Champions League",
-    # ── Women's ───────────────────────────────────────────────────
+    # Women's
     "eng.w.1":          "Women's Super League",
     "esp.w.1":          "Women's La Liga",
     "uefa.wchampions":  "Women's Champions League",
 }
 
-ESPN_INTL_LEAGUES = {
+ESPN_INTL_LEAGUES: dict[str, str] = {
     "fifa.friendly":        "International Friendly",
     "fifa.world":           "FIFA World Cup",
     "uefa.euro":            "European Championship",
@@ -69,9 +75,7 @@ ESPN_INTL_LEAGUES = {
     "fifa.worldq.ofc":      "WC Qualifier Oceania",
 }
 
-ESPN_CLUB_SLUGS = set(ESPN_CLUB_LEAGUES.keys())
-
-# ESPN status names that mean a game was cancelled / will not be played
+_ALL_CLUB_NAMES: set[str] = set(ESPN_CLUB_LEAGUES.values())
 _CANCELLED_KEYWORDS = {"CANCEL", "POSTPONE", "SUSPEND", "ABANDON"}
 
 
@@ -80,7 +84,6 @@ _CANCELLED_KEYWORDS = {"CANCEL", "POSTPONE", "SUSPEND", "ABANDON"}
 # ══════════════════════════════════════════════════════════════════
 
 COUNTRIES = {
-    # Europe
     "Albania","Andorra","Armenia","Austria","Azerbaijan","Belarus",
     "Belgium","Bosnia","Bosnia & Herzegovina","Bosnia and Herzegovina",
     "Bulgaria","Croatia","Cyprus","Czech Republic","Czechia",
@@ -93,7 +96,6 @@ COUNTRIES = {
     "Portugal","Romania","Russia","Football Union of Russia",
     "San Marino","Scotland","Serbia","Slovakia","Slovenia","Spain",
     "Sweden","Switzerland","Turkey","Ukraine","Wales",
-    # Americas
     "Argentina","Aruba","Bahamas","Barbados","Belize","Bermuda",
     "Bolivia","Brazil","Canada","Cayman Islands","Chile","Colombia",
     "Costa Rica","Cuba","Curacao","Dominican Republic","Ecuador",
@@ -105,7 +107,6 @@ COUNTRIES = {
     "USA","United States","Venezuela","Virgin Islands",
     "Antigua and Barbuda","Dominica","Saint Vincent and the Grenadines",
     "Montserrat","Anguilla",
-    # Africa
     "Algeria","Angola","Benin","Botswana","Burkina Faso","Burundi",
     "Cameroon","Cape Verde","Cape Verde Islands","Central African Republic",
     "Chad","Comoros","Congo","DR Congo","Djibouti","Egypt",
@@ -117,7 +118,6 @@ COUNTRIES = {
     "Sierra Leone","Somalia","South Africa","South Sudan","Sudan",
     "Swaziland","Eswatini","Tanzania","Togo","Tunisia","Uganda",
     "Zambia","Zimbabwe",
-    # Asia
     "Afghanistan","Bahrain","Bangladesh","Bhutan","Brunei","Cambodia",
     "China","Chinese Taipei","Taiwan","Guam","Hong Kong","India",
     "Indonesia","Iran","IR Iran","Iraq","Japan","Jordan","Kuwait",
@@ -127,23 +127,22 @@ COUNTRIES = {
     "Singapore","South Korea","Korea Republic","Sri Lanka","Syria",
     "Tajikistan","Thailand","Timor-Leste","Turkmenistan",
     "UAE","United Arab Emirates","Uzbekistan","Vietnam","Yemen",
-    # Oceania
     "American Samoa","Australia","Cook Islands","Fiji","New Caledonia",
     "New Zealand","Papua New Guinea","Samoa","Solomon Islands",
     "Tahiti","Tonga","Vanuatu",
 }
 
 CLUB_INDICATORS = [
-    " fc", " cf", " sc", " ac", " bc", " bk", " sk", " fk", " nk",
-    " united", " city", " town", " rovers", " wanderers", " athletic",
-    " albion", " hotspur", " villa", " palace", " wednesday", " county",
-    " forest", " rangers", " celtic", " thistle", " sporting", " benfica",
-    " porto", " ajax", " psv", " feyenoord", " madrid", " barcelona",
-    " atletico", " sevilla", " valencia", " juventus", " milan", " inter",
-    " napoli", " roma", " lazio", " munich", " dortmund", " leverkusen",
-    " frankfurt", " paris", " lyon", " marseille", " monaco",
-    " arsenal", " chelsea", " liverpool", " tottenham",
-    " galatasaray", " fenerbahce", " besiktas",
+    " fc"," cf"," sc"," ac"," bc"," bk"," sk"," fk"," nk",
+    " united"," city"," town"," rovers"," wanderers"," athletic",
+    " albion"," hotspur"," villa"," palace"," wednesday"," county",
+    " forest"," rangers"," celtic"," thistle"," sporting"," benfica",
+    " porto"," ajax"," psv"," feyenoord"," madrid"," barcelona",
+    " atletico"," sevilla"," valencia"," juventus"," milan"," inter",
+    " napoli"," roma"," lazio"," munich"," dortmund"," leverkusen",
+    " frankfurt"," paris"," lyon"," marseille"," monaco",
+    " arsenal"," chelsea"," liverpool"," tottenham",
+    " galatasaray"," fenerbahce"," besiktas",
 ]
 
 
@@ -166,13 +165,42 @@ def is_national_team(name: str) -> bool:
 
 
 def is_international_match(match: dict) -> bool:
-    home = match.get("homeTeam", {}).get("name", "")
-    away = match.get("awayTeam", {}).get("name", "")
-    return is_national_team(home) and is_national_team(away)
+    h = match.get("homeTeam", {}).get("name", "")
+    a = match.get("awayTeam", {}).get("name", "")
+    return is_national_team(h) and is_national_team(a)
 
 
 # ══════════════════════════════════════════════════════════════════
-# ESPN — SOLE DATA SOURCE
+# COMPETITION FLAG HELPER
+# ══════════════════════════════════════════════════════════════════
+
+_FLAG_MAP = {
+    "Champions League": "🏆", "Premier League": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
+    "Bundesliga": "🇩🇪", "La Liga": "🇪🇸", "Serie A": "🇮🇹",
+    "Ligue 1": "🇫🇷", "World Cup": "🌍", "Friendly": "🤝",
+    "European Championship": "🇪🇺", "Nations League": "🏆",
+    "Europa League": "🟠", "Conference": "🟢", "FA Cup": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
+    "Copa America": "🌎", "CONCACAF": "🌎", "Gold Cup": "🌎",
+    "AFCON": "🌍", "Africa Cup": "🌍", "CAF": "🌍",
+    "Asian": "🌏", "Qualifier": "🌍", "MLS": "🇺🇸",
+    "Brasileirao": "🇧🇷", "Liga MX": "🇲🇽",
+    "Scottish": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Eredivisie": "🇳🇱",
+    "Championship": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Primeira Liga": "🇵🇹",
+    "Women's Champions": "🏆", "Women's Super": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
+    "Women's La Liga": "🇪🇸",
+}
+
+
+def _comp_flag(comp_name: str) -> str:
+    comp_lower = comp_name.lower()
+    for k, v in _FLAG_MAP.items():
+        if k.lower() in comp_lower:
+            return v
+    return "⚽"
+
+
+# ══════════════════════════════════════════════════════════════════
+# ESPN HTTP
 # ══════════════════════════════════════════════════════════════════
 
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/soccer"
@@ -189,78 +217,21 @@ def _espn_get(url: str, timeout: int = 10) -> dict | None:
         r = requests.get(url, headers=ESPN_HEADERS, timeout=timeout)
         if r.status_code == 200:
             return r.json()
-        elif r.status_code == 429:
+        if r.status_code == 429:
             print("[ESPN] ⚠️  Rate limited — waiting 30s")
             time.sleep(30)
             return _espn_get(url, timeout)
-        else:
-            print(f"[ESPN] HTTP {r.status_code}: {url[:80]}")
+        print(f"[ESPN] HTTP {r.status_code}: {url[:80]}")
     except Exception as e:
         print(f"[ESPN] ❌ {e}")
     return None
 
 
-def espn_get_league(slug: str, league_name: str) -> list[dict]:
-    from datetime import timedelta
-    now       = datetime.now(timezone.utc)
-    today     = now.strftime("%Y%m%d")
-    yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
-    today_str     = now.strftime("%Y-%m-%d")
-    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    seen_ids = set()   # BUG5 FIX: deduplicate — same match can appear in both date fetches
-    results  = []
-    # Fetch both today AND yesterday to catch late-night matches still running
-    for date_str, date_prefix in [(today, today_str), (yesterday, yesterday_str)]:
-        data = _espn_get(f"{ESPN_API}/{slug}/scoreboard?dates={date_str}&limit=50")
-        if not data:
-            continue
-        for e in data.get("events", []):
-            event_date = e.get("date", "")
-            # B5 FIX: never drop a live match on date alone (midnight crossings)
-            state   = e.get("status", {}).get("type", {}).get("state", "pre").lower()
-            if state != "in":
-                if event_date and not event_date.startswith(date_prefix):
-                    continue
-            n = _normalize_espn(e, slug, league_name)
-            if not n:
-                continue
-            # Always include live/active matches regardless of date
-            # Only skip yesterday's matches if they are already finished
-            if date_str == yesterday and n["status"] == "FINISHED":
-                continue
-            # BUG5 FIX: skip if we already have this match from today's fetch
-            if n["id"] in seen_ids:
-                continue
-            seen_ids.add(n["id"])
-            results.append(n)
-    return results
-
-
-def espn_get_all_matches() -> list[dict]:
-    print("[ESPN] Fetching today's matches...")
-    all_matches = []
-    for slug, name in {**ESPN_CLUB_LEAGUES, **ESPN_INTL_LEAGUES}.items():
-        m = espn_get_league(slug, name)
-        if m:
-            print(f"[ESPN] {name}: {len(m)}")
-        all_matches.extend(m)
-        time.sleep(0.2)
-    return all_matches
-
+# ══════════════════════════════════════════════════════════════════
+# ESPN NORMALISER
+# ══════════════════════════════════════════════════════════════════
 
 def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
-    """
-    Convert an ESPN event to our standard match dict.
-
-    Cancelled/postponed/abandoned games return None — they are silently
-    dropped and never posted.
-
-    Extra time and penalty shootout fields:
-      _went_to_et        True if the match entered extra time
-      _went_to_penalties True if decided by a penalty shootout
-      _penalty_home/away Shootout goal counts (not miss counts)
-    """
     try:
         competitions = event.get("competitions", [{}])
         comp         = competitions[0] if competitions else {}
@@ -279,38 +250,32 @@ def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
         state_str = event.get("status", {}).get("type", {}).get("state", "pre").lower()
         name_str  = event.get("status", {}).get("type", {}).get("name", "").upper()
 
-        # ── Cancelled / postponed / abandoned — drop silently ─────
+        # Drop cancelled / postponed / abandoned silently
         if any(kw in name_str for kw in _CANCELLED_KEYWORDS):
-            print(f"[ESPN] ⛔ Skipping cancelled/postponed: {home_name} vs {away_name}")
+            print(f"[ESPN] ⛔ Skipping cancelled: {home_name} vs {away_name}")
             return None
 
-        # ── Status mapping (most specific first) ──────────────────
-        went_to_et         = False
-        went_to_penalties  = False
-        penalty_home       = None
-        penalty_away       = None
+        # ── Status mapping ────────────────────────────────────────
+        went_to_et        = False
+        went_to_penalties = False
+        penalty_home      = None
+        penalty_away      = None
 
         if "SHOOTOUT" in name_str:
             norm_status       = "SHOOTOUT"
             went_to_et        = True
             went_to_penalties = True
-
         elif "OVER_TIME" in name_str or "OVERTIME" in name_str:
-            # Covers STATUS_OVER_TIME, STATUS_FIRST_OVER_TIME, STATUS_SECOND_OVER_TIME
-            norm_status  = "EXTRA_TIME"
-            went_to_et   = True
-
+            norm_status = "EXTRA_TIME"
+            went_to_et  = True
         elif "HALFTIME" in name_str:
             norm_status = "PAUSED"
-
         elif state_str == "post":
             norm_status = "FINISHED"
-            # Penalty shootout result — ESPN stores these as integers on the comp object
             sh = comp.get("shootoutHome")
             sa = comp.get("shootoutAway")
             if sh is not None and sa is not None:
                 try:
-                    # BUG2 FIX: ESPN sometimes returns "3.0" — use int(float()) to be safe
                     penalty_home      = int(float(str(sh)))
                     penalty_away      = int(float(str(sa)))
                     went_to_penalties = True
@@ -318,16 +283,15 @@ def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
                 except (ValueError, TypeError):
                     pass
             elif "AET" in name_str or "OVER_TIME" in name_str:
-                # Ended after ET but no shootout
                 went_to_et = True
-
         elif state_str == "in":
             norm_status = "IN_PLAY"
-
         else:
             norm_status = "SCHEDULED"
 
         # ── Goals ─────────────────────────────────────────────────
+        # ESPN provides clock via scoringPlays[].clock.displayValue ("45:23")
+        # poster._minute() normalises "45:23" → "45"
         home_id = home.get("team", {}).get("id", "")
         goals   = []
 
@@ -384,7 +348,6 @@ def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
             "_comp_name":          league_name,
             "_comp_flag":          _comp_flag(league_name),
             "_is_intl":            slug in ESPN_INTL_LEAGUES,
-            # Extra time / penalty flags
             "_went_to_et":         went_to_et,
             "_went_to_penalties":  went_to_penalties,
             "_penalty_home":       penalty_home,
@@ -408,7 +371,7 @@ def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
             },
             "goals":    goals,
             "bookings": bookings,
-            "lineups":  [],  # ESPN scoreboard API does not provide lineup data
+            "lineups":  [],   # ESPN scoreboard does not provide lineup data
         }
 
     except Exception as e:
@@ -417,43 +380,66 @@ def _normalize_espn(event: dict, slug: str, league_name: str) -> dict | None:
 
 
 # ══════════════════════════════════════════════════════════════════
-# COMPETITION FLAG HELPER
+# FETCH PER LEAGUE
 # ══════════════════════════════════════════════════════════════════
 
-_FLAG_MAP = {
-    "Champions League": "🏆", "Premier League": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-    "Bundesliga": "🇩🇪", "La Liga": "🇪🇸", "Serie A": "🇮🇹",
-    "Ligue 1": "🇫🇷", "World Cup": "🌍", "Friendly": "🤝",
-    "European Championship": "🇪🇺", "Nations League": "🏆",
-    "Europa League": "🟠", "Conference": "🟢", "FA Cup": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-    "Copa America": "🌎", "CONCACAF": "🌎", "Gold Cup": "🌎",
-    "AFCON": "🌍", "Africa Cup": "🌍", "CAF": "🌍",
-    "Asian": "🌏", "Qualifier": "🌍", "MLS": "🇺🇸",
-    "Brasileirao": "🇧🇷", "Liga MX": "🇲🇽",
-    "Scottish": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Eredivisie": "🇳🇱",
-    "Championship": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-}
+def espn_get_league(slug: str, league_name: str) -> list[dict]:
+    now           = datetime.now(timezone.utc)
+    today         = now.strftime("%Y%m%d")
+    yesterday     = (now - timedelta(days=1)).strftime("%Y%m%d")
+    today_str     = now.strftime("%Y-%m-%d")
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    seen_ids = set()
+    results  = []
+
+    for date_str, date_prefix in [(today, today_str), (yesterday, yesterday_str)]:
+        data = _espn_get(f"{ESPN_API}/{slug}/scoreboard?dates={date_str}&limit=50")
+        if not data:
+            continue
+        for e in data.get("events", []):
+            event_date = e.get("date", "")
+            state      = e.get("status", {}).get("type", {}).get("state", "pre").lower()
+
+            # B5 FIX: never drop a live match on date alone (midnight crossings)
+            if state != "in":
+                if event_date and not event_date.startswith(date_prefix):
+                    continue
+
+            n = _normalize_espn(e, slug, league_name)
+            if not n:
+                continue
+            # Drop yesterday's already-finished matches
+            if date_str == yesterday and n["status"] == "FINISHED":
+                continue
+            # Dedup across both date fetches
+            if n["id"] in seen_ids:
+                continue
+            seen_ids.add(n["id"])
+            results.append(n)
+
+    return results
 
 
-def _comp_flag(comp_name: str) -> str:
-    comp_lower = comp_name.lower()
-    for k, v in _FLAG_MAP.items():
-        if k.lower() in comp_lower:
-            return v
-    return "⚽"
+def espn_get_all_matches() -> list[dict]:
+    print("[ESPN] Fetching today's matches...")
+    all_matches = []
+    for slug, name in {**ESPN_CLUB_LEAGUES, **ESPN_INTL_LEAGUES}.items():
+        m = espn_get_league(slug, name)
+        if m:
+            print(f"[ESPN] {name}: {len(m)}")
+        all_matches.extend(m)
+        time.sleep(0.2)
+    return all_matches
 
 
 # ══════════════════════════════════════════════════════════════════
-# PUBLIC API — called by bot.py
+# STALENESS FILTER
 # ══════════════════════════════════════════════════════════════════
 
 def _is_stale_finished(match: dict) -> bool:
-    """
-    Returns True if a FINISHED match kicked off more than 4 hours ago.
-    We never want to post these even if ESPN still shows them today.
-    Matches still in EXTRA_TIME or SHOOTOUT are never stale.
-    """
-    if match.get("status") not in ("FINISHED",):
+    """True if a FINISHED match kicked off more than 6 hours ago."""
+    if match.get("status") != "FINISHED":
         return False
     utc_str = match.get("utcDate", "")
     if not utc_str:
@@ -461,36 +447,30 @@ def _is_stale_finished(match: dict) -> bool:
     try:
         ko      = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
         elapsed = (datetime.now(timezone.utc) - ko).total_seconds() / 3600
-        # BUG6 FIX: 4h was too tight — a 22:00 KO with ET + pens + delays can hit ~2.5h play time.
-        # 6h gives safe headroom without leaking genuinely old results.
         return elapsed > 6
     except Exception:
         return False
 
 
+# ══════════════════════════════════════════════════════════════════
+# PUBLIC API
+# ══════════════════════════════════════════════════════════════════
+
 def get_todays_matches() -> list[dict]:
-    """
-    All of today's relevant matches from ESPN.
-    Cancelled / postponed / abandoned games are already filtered by
-    _normalize_espn returning None — they never reach this list.
-    """
+    """Return today's relevant matches from ESPN."""
     all_matches = espn_get_all_matches()
 
     # Keep whitelisted club leagues + any country vs country fixture
     matches = [
         m for m in all_matches
-        if is_international_match(m)
-        or any(
-            m.get("_comp_name") == name
-            for name in ESPN_CLUB_LEAGUES.values()
-        )
+        if is_international_match(m) or m.get("_comp_name") in _ALL_CLUB_NAMES
     ]
 
-    # Drop stale finished matches
+    # Drop stale finished matches (kicked off 6+ hours ago)
     before  = len(matches)
     matches = [m for m in matches if not _is_stale_finished(m)]
     dropped = before - len(matches)
     if dropped:
-        print(f"[SCRAPER] Dropped {dropped} stale finished match(es) from >4h ago")
+        print(f"[SCRAPER] Dropped {dropped} stale finished match(es)")
 
     return matches

@@ -2,13 +2,18 @@
 bot.py — ScoreLine Live main bot
 ==================================
 Events posted:
-  1. 📋 Lineup confirmed (pre-match, if data available)
-  2.📌  Kick-off
+  1. 📋 Lineup confirmed (ESPN does not provide this — field is always empty)
+  2. 📌 Kick-off
   3. ⚽ Goal (with score and scorer)
-  4. ⏱️  Extra time start
-  5. 🏁 Full time (includes AET / penalty result)
+  4. ⏸️  Half time score (FD matches only by default)
+  5. 🟥  Red card        (FD matches only by default)
+  6. ⏱️  Extra time start
+  7. 🏁  Full time (includes AET / penalty result)
 
-No halftime posts. No red card posts.
+Halftime and red card posting is gated to football-data.org matches
+by default to avoid post accumulation on busy days.
+Set POST_HALFTIME_ALL=true or POST_RED_CARDS_ALL=true in config
+to enable them for all sources.
 """
 
 import json
@@ -21,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import config
 import scraper
 import poster
+import stats as stats_module
 
 # ══════════════════════════════════════════════════════════════════
 # RAILWAY KEEP-ALIVE SERVER
@@ -52,12 +58,14 @@ def _start_keepalive():
 
 STATE_FILE = "state.json"
 
-_events: dict[str, float] = {}
-_last_preview_date: str    = ""
+_events:            dict[str, float] = {}
+_last_preview_date: str              = ""
+_last_stats_date:   str              = ""   # "YYYY-MM-DD" of last stats run
+_stats_posted:      set[str]         = set() # which slots were posted today
 
 
 def _load_state():
-    global _events, _last_preview_date
+    global _events, _last_preview_date, _last_stats_date, _stats_posted
     if not os.path.exists(STATE_FILE):
         return
     try:
@@ -65,6 +73,8 @@ def _load_state():
             raw = json.load(f)
         _events            = raw.get("events", {})
         _last_preview_date = raw.get("last_preview_date", "")
+        _last_stats_date   = raw.get("last_stats_date", "")
+        _stats_posted      = set(raw.get("stats_posted", []))
         print(f"[STATE] Loaded {len(_events)} posted events from disk")
     except Exception as e:
         print(f"[STATE] ⚠️  Could not load state: {e}")
@@ -73,7 +83,12 @@ def _load_state():
 def _save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"events": _events, "last_preview_date": _last_preview_date}, f)
+            json.dump({
+                "events":            _events,
+                "last_preview_date": _last_preview_date,
+                "last_stats_date":   _last_stats_date,
+                "stats_posted":      list(_stats_posted),
+            }, f)
     except Exception as e:
         print(f"[STATE] ⚠️  Could not save state: {e}")
 
@@ -106,7 +121,6 @@ def _post_if_new(key: str, message: str) -> bool:
         return False
     if not message:
         return False
-    # Retry once after 10s on failure
     ok = poster.post(message)
     if not ok:
         print(f"[BOT] ⚠️  Post failed — retrying in 10s...")
@@ -121,11 +135,89 @@ def _post_if_new(key: str, message: str) -> bool:
 # EVENT KEYS
 # ══════════════════════════════════════════════════════════════════
 
-def _key_lineup(mid: str)        -> str: return f"lineup:{mid}"
-def _key_kickoff(mid: str)       -> str: return f"kickoff:{mid}"
-def _key_goal(mid: str, g: dict) -> str: return f"goal:{mid}:{g['scorer']['name']}:{g['minute']}"
-def _key_extratime(mid: str)     -> str: return f"extratime:{mid}"
-def _key_fulltime(mid: str)      -> str: return f"ft:{mid}"
+def _key_lineup(mid: str)               -> str: return f"lineup:{mid}"
+def _key_kickoff(mid: str)              -> str: return f"kickoff:{mid}"
+def _key_goal(mid: str, g: dict)        -> str: return f"goal:{mid}:{g['scorer']['name']}:{g['minute']}"
+def _key_extratime(mid: str)            -> str: return f"extratime:{mid}"
+def _key_fulltime(mid: str)             -> str: return f"ft:{mid}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# NON-MATCHDAY STATS POSTS
+# ══════════════════════════════════════════════════════════════════
+
+def maybe_post_stats(matches: list):
+    """
+    Post up to 5 stats updates per day on a fixed UTC schedule.
+    Skips if today has >= STATS_BUSY_THRESHOLD active matches
+    (unless STATS_ON_MATCHDAYS is explicitly set to true).
+    """
+    global _last_stats_date, _stats_posted
+
+    if not config.POST_STATS:
+        return
+
+    now   = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # Reset slate at midnight
+    if _last_stats_date != today:
+        _last_stats_date = today
+        _stats_posted    = set()
+        _save_state()
+
+    # Skip on busy match days unless overridden
+    if not config.STATS_ON_MATCHDAYS:
+        active = [
+            m for m in matches
+            if m["status"] not in ("FINISHED",)
+        ]
+        if len(active) >= config.STATS_BUSY_THRESHOLD:
+            return
+
+    sched   = stats_module.STATS_SCHEDULE
+    minutes = stats_module.STATS_MINUTE
+    league1, league2 = stats_module.todays_leagues()
+
+    for slot, hour in sched.items():
+        if slot in _stats_posted:
+            continue
+        target_min = minutes.get(slot, 0)
+        # Fire when we're within the correct hour and past the target minute
+        if now.hour != hour or now.minute < target_min:
+            continue
+
+        print(f"[STATS] ⏰ Firing stats slot: {slot}")
+        _run_stats_slot(slot, league1, league2)
+        _stats_posted.add(slot)
+        _save_state()
+        time.sleep(3)  # small gap between consecutive stats posts
+
+
+def _run_stats_slot(slot: str, league1: tuple, league2: tuple):
+    """Fetch data and post for a single stats slot."""
+    if slot == "standings_1":
+        rows = stats_module.get_standings(league1)
+        if rows:
+            poster.post(poster.fmt_standings(league1, rows))
+        else:
+            print(f"[STATS] ⚠️  No standings data for slot {slot}")
+
+    elif slot == "standings_2":
+        rows = stats_module.get_standings(league2)
+        if rows:
+            poster.post(poster.fmt_standings(league2, rows))
+        else:
+            print(f"[STATS] ⚠️  No standings data for slot {slot}")
+
+    elif slot == "upcoming":
+        fixtures = stats_module.get_upcoming_fixtures(days_ahead=2)
+        if fixtures:
+            msg = poster.fmt_upcoming_fixtures(fixtures)
+            if msg:
+                poster.post(msg)
+        else:
+            print("[STATS] ⚠️  No upcoming fixtures found")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -156,8 +248,8 @@ def process_match(match: dict):
     status = match["status"]
     hname  = match["homeTeam"]["name"]
     aname  = match["awayTeam"]["name"]
-
     # ── Lineups ───────────────────────────────────────────────────
+    # FD provides lineups; ESPN does not
     if (config.POST_LINEUPS
             and status == "SCHEDULED"
             and match.get("lineups")
@@ -166,14 +258,12 @@ def process_match(match: dict):
         _post_if_new(_key_lineup(mid), poster.fmt_lineup(match))
 
     # ── Kick-off ──────────────────────────────────────────────────
-    # Always force 0-0 — ESPN may already show a score by the time
-    # we detect IN_PLAY, but the kickoff post should always be 0-0
     if config.POST_KICKOFF and status == "IN_PLAY":
         kickoff_match = {**match, "score": {
             "halfTime": {"home": None, "away": None},
             "fullTime": {"home": 0, "away": 0},
         }}
-        print(f"[BOT]📌  Kickoff: {hname} vs {aname}")
+        print(f"[BOT] 📌 Kickoff: {hname} vs {aname}")
         _post_if_new(_key_kickoff(mid), poster.fmt_kickoff(kickoff_match))
 
     # ── Goals ─────────────────────────────────────────────────────
@@ -188,10 +278,9 @@ def process_match(match: dict):
 
     # ── Extra time ────────────────────────────────────────────────
     if status in ("EXTRA_TIME", "SHOOTOUT") or (
-        status == "FINISHED" and match.get("_went_to_et")
-    ):
+            status == "FINISHED" and match.get("_went_to_et")):
         if not _already_posted(_key_extratime(mid)):
-            print(f"[BOT] ⏱️ Extra time: {hname} vs {aname}")
+            print(f"[BOT] ⏱️  Extra time: {hname} vs {aname}")
             _post_if_new(_key_extratime(mid), poster.fmt_extratime(match))
 
     # ── Full time ─────────────────────────────────────────────────
@@ -245,16 +334,19 @@ def main():
     print("[STATE] 🌱 Seeding finished matches on startup...")
     _seed_finished(scraper.get_todays_matches())
 
-    print("=" * 54)
+    print("=" * 60)
     print("  ScoreLine Live Bot — Running")
     print(f"  Poll interval : {config.POLL_INTERVAL}s")
-    print(f"  Lineups       : {config.POST_LINEUPS}")
+    print("  Data source   : ESPN ✅ (free, no key needed)")
+    print(f"  Lineups       : {config.POST_LINEUPS} (not available from ESPN scoreboard)")
     print(f"  Kick-off      : {config.POST_KICKOFF}")
     print(f"  Goals         : {config.POST_GOALS}")
+    print(f"  Extra time    : True")
     print(f"  Full time     : {config.POST_FULLTIME}")
     print(f"  Preview       : {config.POST_DAILY_PREVIEW} @ {config.DAILY_PREVIEW_HOUR}:00 UTC")
+    print(f"  Stats posts   : {config.POST_STATS} ({'all days' if config.STATS_ON_MATCHDAYS else f'quiet days only (<{config.STATS_BUSY_THRESHOLD} matches)'})")
     print(f"  FB Page ID    : {'SET ✅' if config.FB_PAGE_ID else 'NOT SET — dev mode'}")
-    print("=" * 54)
+    print("=" * 60)
 
     tick = 0
 
@@ -266,14 +358,16 @@ def main():
 
             matches = scraper.get_todays_matches()
             print(f"[BOT] {len(matches)} matches today:")
+
             for m in matches:
-                et_tag  = " [ET]"  if m.get("_went_to_et")          else ""
-                pen_tag = " [PEN]" if m.get("_went_to_penalties")    else ""
+                et_tag  = " [ET]"  if m.get("_went_to_et")       else ""
+                pen_tag = " [PEN]" if m.get("_went_to_penalties") else ""
                 print(f"       {m.get('_comp_flag','⚽')} "
                       f"{m['homeTeam']['name']} vs {m['awayTeam']['name']} "
                       f"[{m['status']}{et_tag}{pen_tag}]")
 
             maybe_post_preview(matches)
+            maybe_post_stats(matches)
 
             active = [
                 m for m in matches
