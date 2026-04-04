@@ -39,9 +39,6 @@ ESPN_CLUB_LEAGUES: dict[str, str] = {
     "ita.1":            "Serie A",
     "fra.1":            "Ligue 1",
     "ned.1":            "Eredivisie",
-    "por.1":            "Primeira Liga",
-    "sco.1":            "Scottish Premiership",
-    "tur.1":            "Süper Lig",
     "bel.1":            "Belgian Pro League",
     "ksa.1":            "Saudi Pro League",
     "bra.1":            "Brasileirao",
@@ -55,7 +52,6 @@ ESPN_CLUB_LEAGUES: dict[str, str] = {
     "caf.champions":    "CAF Champions League",
     # Women's
     "eng.w.1":          "Women's Super League",
-    "esp.w.1":          "Women's La Liga",
     "uefa.wchampions":  "Women's Champions League",
 }
 
@@ -184,10 +180,10 @@ _FLAG_MAP = {
     "AFCON": "🌍", "Africa Cup": "🌍", "CAF": "🌍",
     "Asian": "🌏", "Qualifier": "🌍", "MLS": "🇺🇸",
     "Brasileirao": "🇧🇷", "Liga MX": "🇲🇽",
-    "Scottish": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Eredivisie": "🇳🇱",
-    "Championship": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Primeira Liga": "🇵🇹",
+    "Championship": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Eredivisie": "🇳🇱",
+    "Belgian Pro League": "🇧🇪", "Saudi Pro League": "🇸🇦",
+    "AFC Champions": "🌏", "CAF Champions": "🌍",
     "Women's Champions": "🏆", "Women's Super": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-    "Women's La Liga": "🇪🇸",
 }
 
 

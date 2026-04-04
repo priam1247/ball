@@ -5,15 +5,8 @@ Events posted:
   1. 📋 Lineup confirmed (ESPN does not provide this — field is always empty)
   2. 📌 Kick-off
   3. ⚽ Goal (with score and scorer)
-  4. ⏸️  Half time score (FD matches only by default)
-  5. 🟥  Red card        (FD matches only by default)
-  6. ⏱️  Extra time start
-  7. 🏁  Full time (includes AET / penalty result)
-
-Halftime and red card posting is gated to football-data.org matches
-by default to avoid post accumulation on busy days.
-Set POST_HALFTIME_ALL=true or POST_RED_CARDS_ALL=true in config
-to enable them for all sources.
+  4. ⏱️  Extra time start
+  5. 🏁  Full time (includes AET / penalty result)
 """
 
 import json
@@ -62,6 +55,8 @@ _events:            dict[str, float] = {}
 _last_preview_date: str              = ""
 _last_stats_date:   str              = ""   # "YYYY-MM-DD" of last stats run
 _stats_posted:      set[str]         = set() # which slots were posted today
+_post_timestamps:   list[float]      = []    # rolling timestamps for rate limiting
+_last_post_time:    float            = 0.0   # for MIN_POST_GAP enforcement
 
 
 def _load_state():
@@ -116,10 +111,31 @@ def _mark_posted(key: str):
     _save_state()
 
 
+def _rate_limit_ok() -> bool:
+    """Return True if it is safe to post now (gap + hourly cap)."""
+    global _post_timestamps, _last_post_time
+    now = time.time()
+    # Enforce minimum gap between posts
+    if now - _last_post_time < config.MIN_POST_GAP:
+        wait = int(config.MIN_POST_GAP - (now - _last_post_time))
+        print(f"[BOT] ⏳ Rate limit: waiting {wait}s (MIN_POST_GAP)")
+        time.sleep(wait)
+    # Enforce hourly cap
+    hour_ago = now - 3600
+    _post_timestamps = [t for t in _post_timestamps if t > hour_ago]
+    if len(_post_timestamps) >= config.MAX_POSTS_PER_HOUR:
+        print(f"[BOT] ⚠️  MAX_POSTS_PER_HOUR ({config.MAX_POSTS_PER_HOUR}) reached — skipping post")
+        return False
+    return True
+
+
 def _post_if_new(key: str, message: str) -> bool:
+    global _post_timestamps, _last_post_time
     if _already_posted(key):
         return False
     if not message:
+        return False
+    if not _rate_limit_ok():
         return False
     ok = poster.post(message)
     if not ok:
@@ -128,6 +144,8 @@ def _post_if_new(key: str, message: str) -> bool:
         ok = poster.post(message)
     if ok:
         _mark_posted(key)
+        _post_timestamps.append(time.time())
+        _last_post_time = time.time()
     return ok
 
 
@@ -137,7 +155,11 @@ def _post_if_new(key: str, message: str) -> bool:
 
 def _key_lineup(mid: str)               -> str: return f"lineup:{mid}"
 def _key_kickoff(mid: str)              -> str: return f"kickoff:{mid}"
-def _key_goal(mid: str, g: dict)        -> str: return f"goal:{mid}:{g['scorer']['name']}:{g['minute']}"
+def _key_goal(mid: str, g: dict, idx: int = 0) -> str:
+    minute = str(g['minute']).strip()
+    if minute in ("?", "", "0"):
+        minute = f"idx{idx}"
+    return f"goal:{mid}:{g['scorer']['name']}:{minute}"
 def _key_extratime(mid: str)            -> str: return f"extratime:{mid}"
 def _key_fulltime(mid: str)             -> str: return f"ft:{mid}"
 
@@ -170,7 +192,7 @@ def maybe_post_stats(matches: list):
     if not config.STATS_ON_MATCHDAYS:
         active = [
             m for m in matches
-            if m["status"] not in ("FINISHED",)
+            if m["status"] == "IN_PLAY"
         ]
         if len(active) >= config.STATS_BUSY_THRESHOLD:
             return
@@ -230,6 +252,7 @@ def maybe_post_preview(matches: list):
         return
     now   = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
+    # Fire any time within the preview hour (handles mid-hour restarts)
     if now.hour != config.DAILY_PREVIEW_HOUR or _last_preview_date == today:
         return
     print("[BOT] 📅 Posting daily fixture preview...")
@@ -268,8 +291,8 @@ def process_match(match: dict):
 
     # ── Goals ─────────────────────────────────────────────────────
     if config.POST_GOALS and status in ("IN_PLAY", "PAUSED", "EXTRA_TIME", "SHOOTOUT", "FINISHED"):
-        for goal in match.get("goals", []):
-            key = _key_goal(mid, goal)
+        for idx, goal in enumerate(match.get("goals", [])):
+            key = _key_goal(mid, goal, idx)
             if not _already_posted(key):
                 scorer = goal["scorer"]["name"]
                 print(f"[BOT] ⚽ Goal: {scorer} — {hname} vs {aname}")
@@ -313,8 +336,8 @@ def _seed_finished(matches: list):
             if key not in _events:
                 _events[key] = time.time()
                 seeded += 1
-        for g in m.get("goals", []):
-            k = _key_goal(mid, g)
+        for idx, g in enumerate(m.get("goals", [])):
+            k = _key_goal(mid, g, idx)
             if k not in _events:
                 _events[k] = time.time()
                 seeded += 1

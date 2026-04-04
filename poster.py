@@ -152,12 +152,9 @@ COMP_HASHTAG = {
     "EFL Cup":                    "EFLCup",
     "Championship":               "Championship",
     "Eredivisie":                 "Eredivisie",
-    "Primeira Liga":              "PrimeiraLiga",
     "MLS":                        "MLS",
     "Brasileirao":                "Brasileirao",
     "Liga MX":                    "LigaMX",
-    "Scottish Premiership":       "SPFL",
-    "Süper Lig":                  "SuperLig",
     "Belgian Pro League":         "JPL",
     "Saudi Pro League":           "SPL",
     "AFC Champions Elite":        "ACL",
@@ -490,7 +487,7 @@ def fmt_standings(league: tuple, rows: list) -> str:
       ⬇️ 18. Luton      28GP  -19 GD  21pts
       #PL #ScoreLineLive
     """
-    _, _, name, flag, tag = league
+    _, name, flag, tag = league
     lines = [f"🏆 {flag} {name} — League Table", "━" * 26]
 
     top    = rows[:6]
@@ -532,7 +529,7 @@ def fmt_top_scorers(league: tuple, scorers: list) -> str:
       ...
       #PL #GoldenBoot #ScoreLineLive
     """
-    _, _, name, flag, tag = league
+    _, name, flag, tag = league
     lines = [f"👟 {flag} {name} — Golden Boot Race", "━" * 26]
 
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
